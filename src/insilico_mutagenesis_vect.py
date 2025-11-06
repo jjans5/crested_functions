@@ -138,7 +138,7 @@ def insilico_mutagenesis_vect(
 
 
 def snp_mutagenesis_from_bed(
-    bed_file: str,
+    bed_file: Union[str, pd.DataFrame],
     model,
     adata,
     genome,
@@ -148,21 +148,24 @@ def snp_mutagenesis_from_bed(
     skip_ambiguous: bool = True,
 ) -> pd.DataFrame:
     """
-    Perform in-silico mutagenesis for SNPs from a BED file.
+    Perform in-silico mutagenesis for SNPs from a BED file or DataFrame.
     
     This function:
-    1. Reads SNP positions from a BED file
+    1. Reads SNP positions from a BED file or accepts a DataFrame
     2. Extracts sequences centered on each SNP (using model's seq_length)
     3. Predicts accessibility for wildtype and mutant sequences
     4. Returns log2 fold changes for each SNP-cell_type combination
     
     Parameters
     ----------
-    bed_file : str
-        Path to BED file. Can have formats:
+    bed_file : str or pd.DataFrame
+        Path to BED file or a pandas DataFrame. Can have formats:
         - 3 columns: chrom, start, end (will test all mutations)
         - 4+ columns: chrom, start, end, name, ref, alt (will test specific ref>alt)
+        - 5+ columns: chrom, start, end, ref, alt (name optional)
         - Flexible: ref and alt can be in any columns after position 3
+        
+        If DataFrame, should have columns matching the BED format above.
     model : CREsted model
         Trained model for predictions
     adata : AnnData
@@ -186,7 +189,7 @@ def snp_mutagenesis_from_bed(
         
     Examples
     --------
-    >>> # BED file with just positions (will test all mutations)
+    >>> # From BED file with just positions (will test all mutations)
     >>> results = snp_mutagenesis_from_bed(
     ...     bed_file="snps.bed",
     ...     model=model,
@@ -194,9 +197,25 @@ def snp_mutagenesis_from_bed(
     ...     genome=genome
     ... )
     
-    >>> # BED file with ref/alt specified
+    >>> # From BED file with ref/alt specified
     >>> results = snp_mutagenesis_from_bed(
     ...     bed_file="snps_with_alleles.bed",
+    ...     model=model,
+    ...     adata=adata,
+    ...     genome=genome
+    ... )
+    
+    >>> # From DataFrame
+    >>> import pandas as pd
+    >>> snps_df = pd.DataFrame({
+    ...     'chrom': ['chr1', 'chr2'],
+    ...     'start': [1000, 2000],
+    ...     'end': [1001, 2001],
+    ...     'ref': ['A', 'C'],
+    ...     'alt': ['G', 'T']
+    ... })
+    >>> results = snp_mutagenesis_from_bed(
+    ...     bed_file=snps_df,
     ...     model=model,
     ...     adata=adata,
     ...     genome=genome
@@ -204,14 +223,26 @@ def snp_mutagenesis_from_bed(
     """
     import crested
     
-    # Read BED file
-    bed_df = pd.read_csv(bed_file, sep="\t", header=None)
+    # Handle input: file path or DataFrame
+    if isinstance(bed_file, pd.DataFrame):
+        bed_df = bed_file.copy()
+        # Ensure standard column names if not already present
+        if bed_df.shape[1] >= 3 and list(bed_df.columns[:3]) != ['chrom', 'start', 'end']:
+            # Assume first 3 columns are chrom, start, end
+            bed_df.columns = ["chrom", "start", "end"] + [f"col{i}" for i in range(3, bed_df.shape[1])]
+    elif isinstance(bed_file, str):
+        # Read BED file
+        bed_df = pd.read_csv(bed_file, sep="\t", header=None)
+    else:
+        raise TypeError("bed_file must be either a file path (str) or a pandas DataFrame")
     
     # Parse BED format
     if bed_df.shape[1] < 3:
-        raise ValueError("BED file must have at least 3 columns (chrom, start, end)")
+        raise ValueError("BED data must have at least 3 columns (chrom, start, end)")
     
-    bed_df.columns = ["chrom", "start", "end"] + [f"col{i}" for i in range(3, bed_df.shape[1])]
+    # Standardize column names if needed
+    if 'chrom' not in bed_df.columns or 'start' not in bed_df.columns:
+        bed_df.columns = ["chrom", "start", "end"] + [f"col{i}" for i in range(3, bed_df.shape[1])]
     
     # Check if ref/alt are provided
     has_ref_alt = bed_df.shape[1] >= 6
