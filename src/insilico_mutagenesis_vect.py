@@ -6,7 +6,7 @@ from typing import Optional, Union, List
 def insilico_mutagenesis_vect(
     seq: str,
     model,
-    adata,
+    cell_types: Optional[Union[List[str], 'anndata.AnnData']] = None,
     chrom: str | None = None,
     start: int | None = None,   # genomic start for seq[0]; if None we report 0-based pos0
     skip_ambiguous: bool = True,
@@ -16,15 +16,32 @@ def insilico_mutagenesis_vect(
     """
     Vectorized single-nucleotide in-silico mutagenesis (ISM).
 
-    Assumptions
-    -----------
-    - crested.tl.predict(input=[str, ...], model=model) -> np.ndarray (N x C)
-    - Columns correspond to `adata.obs_names` (length C)
+    Parameters
+    ----------
+    seq : str
+        DNA sequence to mutate
+    model : CREsted model
+        Trained model for predictions
+    cell_types : list of str or AnnData, optional
+        Cell type names for predictions. Can be:
+        - List of strings: ['CellType1', 'CellType2', ...]
+        - AnnData object: will use adata.obs_names
+        - None: will auto-generate names from model output
+    chrom : str, optional
+        Chromosome name for annotation
+    start : int, optional
+        Genomic start position for seq[0]
+    skip_ambiguous : bool, default=True
+        Skip positions with ambiguous nucleotides
+    batch_size : int, default=2
+        Batch size for predictions
+    return_long : bool, default=True
+        Return tidy long-format DataFrame with log2fc
 
     Returns
     -------
     dict with:
-      wt_pred:      pd.Series (index=adata.obs_names)
+      wt_pred:      pd.Series (index=cell_types)
       mut_df_wide:  pd.DataFrame with metadata columns ['chrom','genomic_pos','pos0','ref','alt','mut_id']
                     plus one column per cell type (absolute predictions)
       mut_df_long:  (if return_long) tidy DataFrame with columns
@@ -35,16 +52,39 @@ def insilico_mutagenesis_vect(
 
     seq = seq.upper()
     bases = ("A", "C", "G", "T")
-    cell_types = list(map(str, adata.obs_names))
+    
+    # Handle cell_types input
+    if cell_types is None:
+        # Will infer from model output shape
+        cell_types_list = None
+    elif hasattr(cell_types, 'obs_names'):
+        # It's an AnnData object
+        cell_types_list = list(map(str, cell_types.obs_names))
+    elif isinstance(cell_types, (list, tuple)):
+        # It's already a list
+        cell_types_list = list(map(str, cell_types))
+    else:
+        raise TypeError("cell_types must be a list of strings, an AnnData object, or None")
+    
     L = len(seq)
-    C = len(cell_types)
 
     # 1) WT prediction
-    wt = crested.tl.predict(input=[seq], model=model,batch_size=batch_size)
+    wt = crested.tl.predict(input=[seq], model=model, batch_size=batch_size)
     wt = np.asarray(wt, dtype=np.float32).reshape(1, -1)
-    if wt.shape[1] != C:
-        raise ValueError(f"Prediction size mismatch: got {wt.shape[1]} cell types, expected {C} from adata.obs_names")
-    wt_pred = pd.Series(wt[0], index=cell_types, name="wildtype")
+    
+    # Infer cell types from output if not provided
+    if cell_types_list is None:
+        C = wt.shape[1]
+        cell_types_list = [f"CellType_{i}" for i in range(C)]
+    else:
+        C = len(cell_types_list)
+        if wt.shape[1] != C:
+            raise ValueError(
+                f"Prediction size mismatch: got {wt.shape[1]} cell types from model, "
+                f"expected {C} from cell_types parameter"
+            )
+    
+    wt_pred = pd.Series(wt[0], index=cell_types_list, name="wildtype")
 
     # 2) Build all mutants (vectorized): 3 mutants per valid position
     mutant_seqs = []
@@ -69,14 +109,14 @@ def insilico_mutagenesis_vect(
             alt_list.append(alt)
 
     if not mutant_seqs:
-        mut_df_wide = pd.DataFrame(columns=["chrom","genomic_pos","pos0","ref","alt","mut_id"] + cell_types)
+        mut_df_wide = pd.DataFrame(columns=["chrom","genomic_pos","pos0","ref","alt","mut_id"] + cell_types_list)
         out = {"wt_pred": wt_pred, "mut_df_wide": mut_df_wide}
         if return_long:
             out["mut_df_long"] = pd.DataFrame(columns=["chrom","genomic_pos","pos0","ref","alt","mut_id","cell_type","value","delta"])
         return out
 
     # 3) Predict all mutants in a single call
-    preds = crested.tl.predict(input=mutant_seqs, model=model,batch_size=batch_size)
+    preds = crested.tl.predict(input=mutant_seqs, model=model, batch_size=batch_size)
     preds = np.asarray(preds, dtype=np.float32)
     if preds.shape != (len(mutant_seqs), C):
         raise ValueError(f"Predictions shape {preds.shape} does not match (n_mutants, n_celltypes)=({len(mutant_seqs)}, {C})")
@@ -107,7 +147,7 @@ def insilico_mutagenesis_vect(
             meta_df["ref"] + ">" + meta_df["alt"]
         )
 
-    pred_df = pd.DataFrame(preds, columns=cell_types)
+    pred_df = pd.DataFrame(preds, columns=cell_types_list)
     mut_df_wide = pd.concat([meta_df, pred_df], axis=1)
 
     out = {"wt_pred": wt_pred, "mut_df_wide": mut_df_wide}
@@ -140,8 +180,8 @@ def insilico_mutagenesis_vect(
 def snp_mutagenesis_from_bed(
     bed_file: Union[str, pd.DataFrame],
     model,
-    adata,
     genome,
+    cell_types: Optional[Union[List[str], 'anndata.AnnData']] = None,
     seq_length: Optional[int] = None,
     batch_size: int = 2,
     return_long: bool = True,
@@ -168,10 +208,13 @@ def snp_mutagenesis_from_bed(
         If DataFrame, should have columns matching the BED format above.
     model : CREsted model
         Trained model for predictions
-    adata : AnnData
-        AnnData object with cell type names in .obs_names
     genome : crested.Genome
         Genome object for sequence extraction
+    cell_types : list of str or AnnData, optional
+        Cell type names for predictions. Can be:
+        - List of strings: ['CellType1', 'CellType2', ...]
+        - AnnData object: will use adata.obs_names
+        - None: will auto-generate names from model output
     seq_length : int, optional
         Sequence length for model input. If None, inferred from model.
     batch_size : int, default=2
@@ -193,19 +236,19 @@ def snp_mutagenesis_from_bed(
     >>> results = snp_mutagenesis_from_bed(
     ...     bed_file="snps.bed",
     ...     model=model,
-    ...     adata=adata,
-    ...     genome=genome
+    ...     genome=genome,
+    ...     cell_types=['CellType1', 'CellType2']  # or adata, or None
     ... )
     
     >>> # From BED file with ref/alt specified
     >>> results = snp_mutagenesis_from_bed(
     ...     bed_file="snps_with_alleles.bed",
     ...     model=model,
-    ...     adata=adata,
-    ...     genome=genome
+    ...     genome=genome,
+    ...     cell_types=adata  # Can pass AnnData directly
     ... )
     
-    >>> # From DataFrame
+    >>> # From DataFrame with auto-generated cell type names
     >>> import pandas as pd
     >>> snps_df = pd.DataFrame({
     ...     'chrom': ['chr1', 'chr2'],
@@ -217,8 +260,8 @@ def snp_mutagenesis_from_bed(
     >>> results = snp_mutagenesis_from_bed(
     ...     bed_file=snps_df,
     ...     model=model,
-    ...     adata=adata,
     ...     genome=genome
+    ...     # cell_types=None means auto-generate from model output
     ... )
     """
     import crested
@@ -323,7 +366,7 @@ def snp_mutagenesis_from_bed(
         result = insilico_mutagenesis_vect(
             seq=seq,
             model=model,
-            adata=adata,
+            cell_types=cell_types,
             chrom=chrom,
             start=start,
             skip_ambiguous=skip_ambiguous,
