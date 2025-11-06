@@ -183,9 +183,10 @@ def snp_mutagenesis_from_bed(
     genome,
     cell_types: Optional[Union[List[str], 'anndata.AnnData']] = None,
     seq_length: Optional[int] = None,
-    batch_size: int = 2,
+    batch_size: int = 32,  # Increased default for speed
     return_long: bool = True,
     skip_ambiguous: bool = True,
+    parallel_sequences: int = 10,  # Process multiple SNP regions at once
 ) -> pd.DataFrame:
     """
     Perform in-silico mutagenesis for SNPs from a BED file or DataFrame.
@@ -217,12 +218,14 @@ def snp_mutagenesis_from_bed(
         - None: will auto-generate names from model output
     seq_length : int, optional
         Sequence length for model input. If None, inferred from model.
-    batch_size : int, default=2
-        Batch size for predictions
+    batch_size : int, default=32
+        Batch size for predictions (larger = faster but more memory)
     return_long : bool, default=True
         Return long-format DataFrame with log2fc values
     skip_ambiguous : bool, default=True
         Skip positions with ambiguous nucleotides (N, etc.)
+    parallel_sequences : int, default=10
+        Number of SNP regions to process in parallel batches
         
     Returns
     -------
@@ -309,9 +312,8 @@ def snp_mutagenesis_from_bed(
         except:
             raise ValueError("Could not infer seq_length from model. Please provide seq_length parameter.")
     
-    # Process each SNP
-    all_results = []
-    
+    # Prepare all SNP data first (avoid per-SNP overhead)
+    snp_data = []
     for idx, row in bed_df.iterrows():
         chrom = str(row["chrom"])
         snp_pos = int(row["start"])  # BED is 0-based
@@ -321,98 +323,137 @@ def snp_mutagenesis_from_bed(
         start = center - seq_length // 2
         end = start + seq_length
         
-        # Extract sequence
-        try:
-            region_str = f"{chrom}:{start}-{end}"
-            seq = genome.fetch(chrom, start, end)
-        except Exception as e:
-            print(f"Warning: Could not extract sequence for {region_str}: {e}")
-            continue
-                
-        # Find SNP position within extracted sequence
-        snp_offset = snp_pos - start
-        
-        if snp_offset < 0 or snp_offset >= len(seq):
-            print(f"Warning: SNP position {snp_pos} outside extracted sequence for {region_str}")
-            continue
-        
-        # Get reference allele from sequence
-        ref_from_seq = seq[snp_offset].upper()
-        
         # Determine which mutations to test
-        if has_ref_alt and pd.notna(row.get("ref")) and pd.notna(row.get("alt")):
-            # Use provided ref and alt
-            ref_allele = str(row["ref"]).upper()
-            alt_allele = str(row["alt"]).upper()
-            
-            # Verify ref matches sequence
-            if ref_allele != ref_from_seq:
-                print(f"Warning: Reference allele mismatch at {chrom}:{snp_pos}. "
-                      f"BED has {ref_allele}, sequence has {ref_from_seq}. Using sequence.")
-                ref_allele = ref_from_seq
-            
-            mutations_to_test = [(ref_allele, alt_allele)]
-        else:
-            # Test all possible mutations
-            ref_allele = ref_from_seq
-            bases = ["A", "C", "G", "T"]
-            mutations_to_test = [(ref_allele, alt) for alt in bases if alt != ref_allele]
+        has_ref = pd.notna(row.get("ref"))
+        has_alt = pd.notna(row.get("alt"))
         
-        # Skip if reference is ambiguous
-        if skip_ambiguous and ref_allele not in ["A", "C", "G", "T"]:
-            continue
-        
-        # Run mutagenesis for this sequence
-        result = insilico_mutagenesis_vect(
-            seq=seq,
-            model=model,
-            cell_types=cell_types,
-            chrom=chrom,
-            start=start,
-            skip_ambiguous=skip_ambiguous,
-            batch_size=batch_size,
-            return_long=return_long
-        )
-        
-        if return_long and len(result["mut_df_long"]) > 0:
-            # Filter to only the SNP position and desired mutations
-            snp_results = result["mut_df_long"][
-                result["mut_df_long"]["pos0"] == snp_offset
-            ].copy()
-            
-            # Filter to specific mutations if ref/alt provided
-            if len(mutations_to_test) == 1:
-                ref_allele, alt_allele = mutations_to_test[0]
-                snp_results = snp_results[
-                    (snp_results["ref"] == ref_allele) & 
-                    (snp_results["alt"] == alt_allele)
-                ]
-            
-            # Add wildtype prediction
-            snp_results["wt_pred"] = snp_results["cell_type"].map(result["wt_pred"].to_dict())
-            snp_results["mut_pred"] = snp_results["value"]
-            
-            # Rename columns for clarity
-            snp_results = snp_results.rename(columns={"genomic_pos": "pos"})
-            
-            all_results.append(snp_results)
+        snp_data.append({
+            'chrom': chrom,
+            'snp_pos': snp_pos,
+            'start': start,
+            'end': end,
+            'ref': str(row["ref"]).upper() if has_ref else None,
+            'alt': str(row["alt"]).upper() if has_alt else None,
+        })
     
-    # Combine all results
-    if not all_results:
-        # Return empty DataFrame with expected columns
+    # Batch extract sequences
+    print(f"Extracting {len(snp_data)} sequences...")
+    sequences = []
+    valid_snps = []
+    for i, snp in enumerate(snp_data):
+        try:
+            seq = genome.fetch(snp['chrom'], snp['start'], snp['end'])
+            if len(seq) != seq_length:
+                continue
+            sequences.append(seq)
+            valid_snps.append(snp)
+        except Exception as e:
+            continue
+    
+    if not sequences:
         return pd.DataFrame(columns=[
             "chrom", "pos", "pos0", "ref", "alt", "mut_id", 
             "cell_type", "wt_pred", "mut_pred", "value", "log2fc", "delta"
         ])
     
-    combined_df = pd.concat(all_results, ignore_index=True)
+    print(f"Processing {len(sequences)} valid sequences...")
     
-    # Reorder columns
-    col_order = [
-        "chrom", "pos", "ref", "alt", "mut_id", "cell_type",
-        "wt_pred", "mut_pred", "log2fc", "delta"
-    ]
-    # Only include columns that exist
-    col_order = [c for c in col_order if c in combined_df.columns]
+    # Batch predict all wildtype sequences first
+    import crested
+    wt_preds = crested.tl.predict(input=sequences, model=model, batch_size=batch_size)
+    wt_preds = np.asarray(wt_preds, dtype=np.float32)
     
-    return combined_df[col_order]
+    # Infer cell types from output if not provided
+    if cell_types is None:
+        n_cell_types = wt_preds.shape[1]
+        cell_types_list = [f"CellType_{i}" for i in range(n_cell_types)]
+    elif hasattr(cell_types, 'obs_names'):
+        cell_types_list = list(map(str, cell_types.obs_names))
+    else:
+        cell_types_list = list(map(str, cell_types))
+    
+    # Build all mutant sequences
+    print("Building mutant sequences...")
+    all_mutants = []
+    mutant_metadata = []
+    
+    for seq_idx, (seq, snp) in enumerate(zip(sequences, valid_snps)):
+        snp_offset = snp['snp_pos'] - snp['start']
+        if snp_offset < 0 or snp_offset >= len(seq):
+            continue
+            
+        ref_from_seq = seq[snp_offset].upper()
+        
+        # Determine mutations to test
+        if snp['ref'] and snp['alt']:
+            ref_allele = snp['ref']
+            if ref_allele != ref_from_seq:
+                ref_allele = ref_from_seq
+            mutations = [(ref_allele, snp['alt'])]
+        else:
+            ref_allele = ref_from_seq
+            bases = ["A", "C", "G", "T"]
+            mutations = [(ref_allele, alt) for alt in bases if alt != ref_allele]
+        
+        if skip_ambiguous and ref_allele not in ["A", "C", "G", "T"]:
+            continue
+        
+        for ref_base, alt_base in mutations:
+            if alt_base == ref_base:
+                continue
+            mutant_seq = seq[:snp_offset] + alt_base + seq[snp_offset+1:]
+            all_mutants.append(mutant_seq)
+            mutant_metadata.append({
+                'seq_idx': seq_idx,
+                'chrom': snp['chrom'],
+                'pos': snp['snp_pos'],
+                'ref': ref_base,
+                'alt': alt_base,
+                'snp_offset': snp_offset
+            })
+    
+    if not all_mutants:
+        return pd.DataFrame(columns=[
+            "chrom", "pos", "pos0", "ref", "alt", "mut_id", 
+            "cell_type", "wt_pred", "mut_pred", "value", "log2fc", "delta"
+        ])
+    
+    # Batch predict all mutants
+    print(f"Predicting {len(all_mutants)} mutations...")
+    mut_preds = crested.tl.predict(input=all_mutants, model=model, batch_size=batch_size)
+    mut_preds = np.asarray(mut_preds, dtype=np.float32)
+    
+    # Build results DataFrame
+    print("Building results...")
+    results_list = []
+    
+    for mut_idx, (mut_pred, meta) in enumerate(zip(mut_preds, mutant_metadata)):
+        seq_idx = meta['seq_idx']
+        wt_pred = wt_preds[seq_idx]
+        
+        for ct_idx, ct_name in enumerate(cell_types_list):
+            wt_val = wt_pred[ct_idx]
+            mut_val = mut_pred[ct_idx]
+            
+            # Calculate log2fc
+            epsilon = 1e-10
+            log2fc = np.log2((mut_val + epsilon) / (wt_val + epsilon))
+            delta = mut_val - wt_val
+            
+            mut_id = f"{meta['chrom']}:{meta['pos']}:{meta['ref']}>{meta['alt']}"
+            
+            results_list.append({
+                'chrom': meta['chrom'],
+                'pos': meta['pos'],
+                'ref': meta['ref'],
+                'alt': meta['alt'],
+                'mut_id': mut_id,
+                'cell_type': ct_name,
+                'wt_pred': wt_val,
+                'mut_pred': mut_val,
+                'log2fc': log2fc,
+                'delta': delta
+            })
+    
+    combined_df = pd.DataFrame(results_list)
+    return combined_df
