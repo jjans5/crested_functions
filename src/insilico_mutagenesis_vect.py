@@ -324,11 +324,11 @@ def snp_mutagenesis_from_bed(
         # Extract sequence
         try:
             region_str = f"{chrom}:{start}-{end}"
-            seq = genome.get_sequence(chrom, start, end)
+            seq = genome.fetch(chrom, start, end)
         except Exception as e:
             print(f"Warning: Could not extract sequence for {region_str}: {e}")
             continue
-        
+                
         # Find SNP position within extracted sequence
         snp_offset = snp_pos - start
         
