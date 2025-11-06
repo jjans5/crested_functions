@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.spyderproject
+.spyproject
+.ropeproject
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.h5ad.tmp
+crested_predictions_*/
+temp_predictions/
+ism_results/
+
+# Output files (comment out if you want to include in repo)
+# *.pdf
+# *.png
+# *.jpg
+# correlation_*.pdf
+# *_correlation.pdf
+# celltype_matching.pdf
+# best_matches.pdf
+
+# Data files (too large for git)
+*.h5ad
+*.h5
+*.hdf5
+*.fa
+*.fasta
+*.bam
+*.bai
+*.bed
+*.bigWig
+*.bw
+
+# Model files (too large for git)
+*.keras
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+*.log
+logs/
+
+# Test outputs
+test_output/
+demo_output/
