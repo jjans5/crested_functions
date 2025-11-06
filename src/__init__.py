@@ -21,6 +21,7 @@ from .minimal_predict import (
 
 from .insilico_mutagenesis_vect import (
     insilico_mutagenesis_vect,
+    snp_mutagenesis_from_bed,
 )
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "find_best_matches",
     # In-silico mutagenesis
     "insilico_mutagenesis_vect",
+    "snp_mutagenesis_from_bed",
 ]
 
 __version__ = "1.0.0"

@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from typing import Optional, Union, List
+
 
 def insilico_mutagenesis_vect(
     seq: str,
@@ -26,7 +28,8 @@ def insilico_mutagenesis_vect(
       mut_df_wide:  pd.DataFrame with metadata columns ['chrom','genomic_pos','pos0','ref','alt','mut_id']
                     plus one column per cell type (absolute predictions)
       mut_df_long:  (if return_long) tidy DataFrame with columns
-                    ['chrom','genomic_pos','pos0','ref','alt','mut_id','cell_type','value','delta']
+                    ['chrom','genomic_pos','pos0','ref','alt','mut_id','cell_type','value','log2fc','delta']
+                    where log2fc is log2(mutant/wildtype) and delta is (mutant - wildtype)
     """
     import crested
 
@@ -109,7 +112,7 @@ def insilico_mutagenesis_vect(
 
     out = {"wt_pred": wt_pred, "mut_df_wide": mut_df_wide}
 
-    # 5) Optional: tidy long table with deltas
+    # 5) Optional: tidy long table with deltas (log2 fold change)
     if return_long:
         long = mut_df_wide.melt(
             id_vars=["chrom","genomic_pos","pos0","ref","alt","mut_id"],
@@ -119,7 +122,223 @@ def insilico_mutagenesis_vect(
         )
         # map wt once (fast)
         wt_map = wt_pred.to_dict()
-        long["delta"] = (long["value"] - long["cell_type"].map(wt_map)).astype(np.float32)
+        wt_values = long["cell_type"].map(wt_map)
+        
+        # Calculate log2 fold change: log2(mut/wt)
+        # Add small epsilon to avoid division by zero
+        epsilon = 1e-10
+        long["log2fc"] = np.log2((long["value"] + epsilon) / (wt_values + epsilon)).astype(np.float32)
+        
+        # Also keep absolute delta for reference
+        long["delta"] = (long["value"] - wt_values).astype(np.float32)
+        
         out["mut_df_long"] = long
 
     return out
+
+
+def snp_mutagenesis_from_bed(
+    bed_file: str,
+    model,
+    adata,
+    genome,
+    seq_length: Optional[int] = None,
+    batch_size: int = 2,
+    return_long: bool = True,
+    skip_ambiguous: bool = True,
+) -> pd.DataFrame:
+    """
+    Perform in-silico mutagenesis for SNPs from a BED file.
+    
+    This function:
+    1. Reads SNP positions from a BED file
+    2. Extracts sequences centered on each SNP (using model's seq_length)
+    3. Predicts accessibility for wildtype and mutant sequences
+    4. Returns log2 fold changes for each SNP-cell_type combination
+    
+    Parameters
+    ----------
+    bed_file : str
+        Path to BED file. Can have formats:
+        - 3 columns: chrom, start, end (will test all mutations)
+        - 4+ columns: chrom, start, end, name, ref, alt (will test specific ref>alt)
+        - Flexible: ref and alt can be in any columns after position 3
+    model : CREsted model
+        Trained model for predictions
+    adata : AnnData
+        AnnData object with cell type names in .obs_names
+    genome : crested.Genome
+        Genome object for sequence extraction
+    seq_length : int, optional
+        Sequence length for model input. If None, inferred from model.
+    batch_size : int, default=2
+        Batch size for predictions
+    return_long : bool, default=True
+        Return long-format DataFrame with log2fc values
+    skip_ambiguous : bool, default=True
+        Skip positions with ambiguous nucleotides (N, etc.)
+        
+    Returns
+    -------
+    pd.DataFrame
+        Long-format DataFrame with columns:
+        ['chrom', 'pos', 'ref', 'alt', 'mut_id', 'cell_type', 'wt_pred', 'mut_pred', 'log2fc', 'delta']
+        
+    Examples
+    --------
+    >>> # BED file with just positions (will test all mutations)
+    >>> results = snp_mutagenesis_from_bed(
+    ...     bed_file="snps.bed",
+    ...     model=model,
+    ...     adata=adata,
+    ...     genome=genome
+    ... )
+    
+    >>> # BED file with ref/alt specified
+    >>> results = snp_mutagenesis_from_bed(
+    ...     bed_file="snps_with_alleles.bed",
+    ...     model=model,
+    ...     adata=adata,
+    ...     genome=genome
+    ... )
+    """
+    import crested
+    
+    # Read BED file
+    bed_df = pd.read_csv(bed_file, sep="\t", header=None)
+    
+    # Parse BED format
+    if bed_df.shape[1] < 3:
+        raise ValueError("BED file must have at least 3 columns (chrom, start, end)")
+    
+    bed_df.columns = ["chrom", "start", "end"] + [f"col{i}" for i in range(3, bed_df.shape[1])]
+    
+    # Check if ref/alt are provided
+    has_ref_alt = bed_df.shape[1] >= 6
+    if has_ref_alt:
+        # Try to identify ref and alt columns
+        # Common formats: chrom, start, end, name, ref, alt
+        # Or: chrom, start, end, ref, alt
+        if bed_df.shape[1] >= 6:
+            # Assume columns 4 and 5 are ref/alt (0-indexed: 3 and 4 after chrom/start/end)
+            bed_df["ref"] = bed_df.iloc[:, 4].astype(str).str.upper()
+            bed_df["alt"] = bed_df.iloc[:, 5].astype(str).str.upper()
+        elif bed_df.shape[1] >= 5:
+            # Assume columns 3 and 4 are ref/alt
+            bed_df["ref"] = bed_df.iloc[:, 3].astype(str).str.upper()
+            bed_df["alt"] = bed_df.iloc[:, 4].astype(str).str.upper()
+    
+    # Infer seq_length from model if not provided
+    if seq_length is None:
+        try:
+            seq_length = model.input_shape[1]
+        except:
+            raise ValueError("Could not infer seq_length from model. Please provide seq_length parameter.")
+    
+    # Process each SNP
+    all_results = []
+    
+    for idx, row in bed_df.iterrows():
+        chrom = str(row["chrom"])
+        snp_pos = int(row["start"])  # BED is 0-based
+        
+        # Calculate region centered on SNP
+        center = snp_pos
+        start = center - seq_length // 2
+        end = start + seq_length
+        
+        # Extract sequence
+        try:
+            region_str = f"{chrom}:{start}-{end}"
+            seq = genome.get_sequence(chrom, start, end)
+        except Exception as e:
+            print(f"Warning: Could not extract sequence for {region_str}: {e}")
+            continue
+        
+        # Find SNP position within extracted sequence
+        snp_offset = snp_pos - start
+        
+        if snp_offset < 0 or snp_offset >= len(seq):
+            print(f"Warning: SNP position {snp_pos} outside extracted sequence for {region_str}")
+            continue
+        
+        # Get reference allele from sequence
+        ref_from_seq = seq[snp_offset].upper()
+        
+        # Determine which mutations to test
+        if has_ref_alt and pd.notna(row.get("ref")) and pd.notna(row.get("alt")):
+            # Use provided ref and alt
+            ref_allele = str(row["ref"]).upper()
+            alt_allele = str(row["alt"]).upper()
+            
+            # Verify ref matches sequence
+            if ref_allele != ref_from_seq:
+                print(f"Warning: Reference allele mismatch at {chrom}:{snp_pos}. "
+                      f"BED has {ref_allele}, sequence has {ref_from_seq}. Using sequence.")
+                ref_allele = ref_from_seq
+            
+            mutations_to_test = [(ref_allele, alt_allele)]
+        else:
+            # Test all possible mutations
+            ref_allele = ref_from_seq
+            bases = ["A", "C", "G", "T"]
+            mutations_to_test = [(ref_allele, alt) for alt in bases if alt != ref_allele]
+        
+        # Skip if reference is ambiguous
+        if skip_ambiguous and ref_allele not in ["A", "C", "G", "T"]:
+            continue
+        
+        # Run mutagenesis for this sequence
+        result = insilico_mutagenesis_vect(
+            seq=seq,
+            model=model,
+            adata=adata,
+            chrom=chrom,
+            start=start,
+            skip_ambiguous=skip_ambiguous,
+            batch_size=batch_size,
+            return_long=return_long
+        )
+        
+        if return_long and len(result["mut_df_long"]) > 0:
+            # Filter to only the SNP position and desired mutations
+            snp_results = result["mut_df_long"][
+                result["mut_df_long"]["pos0"] == snp_offset
+            ].copy()
+            
+            # Filter to specific mutations if ref/alt provided
+            if len(mutations_to_test) == 1:
+                ref_allele, alt_allele = mutations_to_test[0]
+                snp_results = snp_results[
+                    (snp_results["ref"] == ref_allele) & 
+                    (snp_results["alt"] == alt_allele)
+                ]
+            
+            # Add wildtype prediction
+            snp_results["wt_pred"] = snp_results["cell_type"].map(result["wt_pred"].to_dict())
+            snp_results["mut_pred"] = snp_results["value"]
+            
+            # Rename columns for clarity
+            snp_results = snp_results.rename(columns={"genomic_pos": "pos"})
+            
+            all_results.append(snp_results)
+    
+    # Combine all results
+    if not all_results:
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=[
+            "chrom", "pos", "pos0", "ref", "alt", "mut_id", 
+            "cell_type", "wt_pred", "mut_pred", "value", "log2fc", "delta"
+        ])
+    
+    combined_df = pd.concat(all_results, ignore_index=True)
+    
+    # Reorder columns
+    col_order = [
+        "chrom", "pos", "ref", "alt", "mut_id", "cell_type",
+        "wt_pred", "mut_pred", "log2fc", "delta"
+    ]
+    # Only include columns that exist
+    col_order = [c for c in col_order if c in combined_df.columns]
+    
+    return combined_df[col_order]

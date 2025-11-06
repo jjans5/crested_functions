@@ -136,31 +136,61 @@ def predict_regions(
         
     # Case 2: regions is a list of region strings
     elif isinstance(regions, (list, tuple)):
-        if genome is None:
-            raise ValueError("Must provide 'genome' when regions is a list of strings")
+        log.info(f"📊 Processing {len(regions)} region strings")
         
-        log.info(f"📊 Creating AnnData from {len(regions)} region strings")
+        # Make predictions directly on the region strings
+        # crested.tl.predict can take a list of region strings
+        log.info("� Making predictions on regions...")
+        predictions = crested.tl.predict(
+            input=regions,
+            model=model,
+            batch_size=batch_size,
+            genome=genome
+        )
         
-        # Get predictions for these regions
-        # crested.tl.predict expects regions as strings
-        # We need to create a minimal AnnData structure
-        # The prediction will return (n_regions, n_cell_types) array
+        # predictions shape: (n_regions, n_cell_types)
+        predictions = np.asarray(predictions, dtype=np.float32)
+        n_regions_pred, n_cell_types_pred = predictions.shape
         
-        # First, we need to know what cell types the model predicts
-        # We can infer this from target_cell_types or make a test prediction
-        if target_cell_types is None:
-            raise ValueError(
-                "When regions is a list of strings, must provide target_cell_types "
-                "to define the cell types for prediction"
+        log.info(f"✅ Predictions shape: {predictions.shape} (regions x cell_types)")
+        
+        # Determine cell types
+        if target_cell_types is not None:
+            if len(target_cell_types) != n_cell_types_pred:
+                log.warning(
+                    f"⚠️ target_cell_types length ({len(target_cell_types)}) doesn't match "
+                    f"prediction output ({n_cell_types_pred}). Using predicted cell types."
+                )
+                cell_types = [f"CellType_{i}" for i in range(n_cell_types_pred)]
+            else:
+                cell_types = target_cell_types
+        else:
+            # Auto-generate cell type names
+            cell_types = [f"CellType_{i}" for i in range(n_cell_types_pred)]
+            log.info(f"📝 Auto-generated {len(cell_types)} cell type names")
+        
+        # Create AnnData with predictions
+        # Note: AnnData expects (n_obs x n_vars) = (n_cell_types x n_regions)
+        var = pd.DataFrame(index=regions)
+        obs = pd.DataFrame(index=cell_types)
+        
+        # Transpose predictions to (n_cell_types, n_regions)
+        X = predictions.T
+        adata_input = ad.AnnData(X=X, obs=obs, var=var)
+        adata_input.layers[layer_name] = X
+        
+        # Return directly without going through _predict_chunked
+        # since we already have the predictions
+        if align_cell_types and target_cell_types is not None:
+            log.info(f"🔄 Aligning cell types to target list of {len(target_cell_types)} cell types")
+            adata_input = align_adata_cell_types(
+                adata_input,
+                target_cell_types=target_cell_types,
+                fill_missing=fill_missing_with_zeros,
+                verbose=verbose
             )
         
-        # Create a minimal AnnData with the regions
-        var = pd.DataFrame(index=regions)
-        obs = pd.DataFrame(index=target_cell_types)
-        
-        # Initialize with zeros - we'll fill with predictions
-        X = np.zeros((len(target_cell_types), len(regions)), dtype=np.float32)
-        adata_input = ad.AnnData(X=X, obs=obs, var=var)
+        return adata_input
         
     else:
         raise TypeError("regions must be either a list of strings or an AnnData object")
