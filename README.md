@@ -1,138 +1,273 @@
-# CREsted Utilities for Cross-Species Analysis
+# CREsted Functions# CREsted Utilities for Cross-Species Analysis
 
-This package provides utility functions for working with [CREsted](https://github.com/aertslab/CREsted) predictions across different species, with a focus on comparing predicted vs observed values even when cell type dimensions don't match.
 
-## Overview
 
-The main module `crested_utils.py` provides:
+Utility functions for cross-species enhancer predictions using the [CREsted](https://github.com/aertslab/CREsted) package.This package provides utility functions for working with [CREsted](https://github.com/aertslab/CREsted) predictions across different species, with a focus on comparing predicted vs observed values even when cell type dimensions don't match.
 
-1. **`predict_regions()`** - Unified function for making predictions on regions or AnnData objects
-2. **`align_adata_cell_types()`** - Align cell types across species (handling missing cell types)
+
+
+## Overview## Overview
+
+
+
+This repository provides tools for:The main module `crested_utils.py` provides:
+
+- **Predicting accessibility** of genomic regions across cell types using trained CREsted models
+
+- **Comparing predictions** with real scATAC-seq data, even when cell types don't match1. **`predict_regions()`** - Unified function for making predictions on regions or AnnData objects
+
+- **In-silico mutagenesis** for analyzing single-nucleotide variants2. **`align_adata_cell_types()`** - Align cell types across species (handling missing cell types)
+
 3. **`compare_predictions()`** - Compare predicted vs true values with correlation metrics
-4. **`rowwise_correlation()`** - Compute row-wise correlations between DataFrames
+
+## Installation4. **`rowwise_correlation()`** - Compute row-wise correlations between DataFrames
+
 5. **`resize_region()`** - Resize genomic regions to specific lengths
 
-## Key Improvements Over Original Code
+```bash
 
-### 1. Unified Prediction Interface
+# Clone the repository## Key Improvements Over Original Code
 
-**Before:** Multiple scattered functions with unclear interfaces
+git clone https://github.com/jjans5/crested_functions.git
 
-**Now:** Single `predict_regions()` function that handles:
+cd crested_functions### 1. Unified Prediction Interface
+
+
+
+# Install dependencies**Before:** Multiple scattered functions with unclear interfaces
+
+pip install crested anndata numpy pandas
+
+```**Now:** Single `predict_regions()` function that handles:
+
 - Direct AnnData objects
-- Lists of region strings
-- Automatic chunking for memory efficiency
-- Cell type alignment in one step
 
-```python
+## Quick Start- Lists of region strings
+
+- Automatic chunking for memory efficiency
+
+### Option 1: Full Version (matching cell types)- Cell type alignment in one step
+
+
+
+When your model and data have overlapping cell types:```python
+
 # Simple case: predict on existing AnnData
-adata_pred = predict_regions(model=model, regions=adata)
+
+```pythonadata_pred = predict_regions(model=model, regions=adata)
+
+from src.crested_utils import predict_regions, compare_predictions
 
 # With cell type alignment for cross-species comparison
-adata_pred = predict_regions(
-    model=model,
-    regions=adata_species,
-    target_cell_types=human_celltypes,
-    align_cell_types=True
-)
+
+# Predict accessibilityadata_pred = predict_regions(
+
+predicted_adata = predict_regions(    model=model,
+
+    model="path/to/model.keras",    regions=adata_species,
+
+    regions=input_adata,  # or just regions as strings/GenomicRanges    target_cell_types=human_celltypes,
+
+    class_names=["CellTypeA", "CellTypeB"]  # model's cell types    align_cell_types=True
+
+))
+
 ```
 
-### 2. Automatic Cell Type Alignment
+# Compare with real data
 
-**Before:** Manual, error-prone code with many steps to align cell types
+results = compare_predictions(predicted_adata, real_adata)### 2. Automatic Cell Type Alignment
 
-**Now:** Automatic alignment with options:
+print(f"Mean correlation: {results['correlations'].mean():.3f}")
+
+```**Before:** Manual, error-prone code with many steps to align cell types
+
+
+
+### Option 2: Minimal Version (zero overlap in cell types)**Now:** Automatic alignment with options:
+
 - Fill missing cell types with zeros (for comparison)
-- Or keep only common cell types
+
+When model and data have completely different cell types:- Or keep only common cell types
+
 - Preserves all layers (predictions, weights, etc.)
-- Maintains exact order specified
+
+```python- Maintains exact order specified
+
+from src.minimal_predict import predict_accessibility, compare_across_celltypes
 
 ```python
-# Align species data to human cell type order
-adata_aligned = align_adata_cell_types(
-    adata_species,
-    target_cell_types=human_celltypes,
-    fill_missing=True  # Add zeros for missing cell types
-)
-```
 
-### 3. Built-in Comparison Functions
+# Predict using model's own cell types# Align species data to human cell type order
+
+predicted_adata = predict_accessibility(adata_aligned = align_adata_cell_types(
+
+    model="path/to/model.keras",    adata_species,
+
+    regions=input_adata    target_cell_types=human_celltypes,
+
+)    fill_missing=True  # Add zeros for missing cell types
+
+)
+
+# Compare across all cell type pairs```
+
+comparison = compare_across_celltypes(predicted_adata, real_adata)
+
+print(f"Best match: {comparison['best_matches'].iloc[0]}")### 3. Built-in Comparison Functions
+
+```
 
 **Before:** Manual DataFrame creation and correlation calculation
 
+### In-Silico Mutagenesis
+
 **Now:** Direct comparison with built-in functions:
 
-```python
-# Compare predictions vs true values
-corr_matrix, self_corr = compare_predictions(
-    adata,
-    prediction_layer="predicted",
-    method="pearson"
-)
+Analyze effects of single-nucleotide variants:
 
-print(f"Mean self-correlation: {self_corr['correlation'].mean():.3f}")
+```python
+
+```python# Compare predictions vs true values
+
+from src.insilico_mutagenesis_vect import insilico_mutagenesis_vectcorr_matrix, self_corr = compare_predictions(
+
+    adata,
+
+results = insilico_mutagenesis_vect(    prediction_layer="predicted",
+
+    model="path/to/model.keras",    method="pearson"
+
+    region="chr1:1000-2000",)
+
+    cell_types=["CellTypeA", "CellTypeB"]
+
+)print(f"Mean self-correlation: {self_corr['correlation'].mean():.3f}")
+
 ```
 
-### 4. Improved Memory Management
+# Returns wildtype predictions and all possible mutations
 
-- Automatic memory monitoring (if `psutil` available)
+print(results['wildtype'])  # Original predictions### 4. Improved Memory Management
+
+print(results['mutations_wide'])  # All mutations in wide format
+
+```- Automatic memory monitoring (if `psutil` available)
+
 - Adaptive chunk sizing based on available memory
-- Option for disk-based processing for very large datasets
+
+## Repository Structure- Option for disk-based processing for very large datasets
+
 - Progress bars for long operations
 
-### 5. Better Error Handling and Logging
-
-- Comprehensive logging at each step
-- Clear error messages
-- Shape validation
-- Informative progress bars
-
-### 6. Type Hints and Documentation
-
-- Full type hints for better IDE support
-- Comprehensive docstrings with examples
-- Clear parameter descriptions
-
-## Installation
-
-```bash
-# Install CREsted (follow their instructions)
-pip install crested
-
-# Optional: for memory monitoring
-pip install psutil
 ```
 
-## Quick Start
+crested_functions/### 5. Better Error Handling and Logging
 
-### Basic Prediction
+├── src/                           # Source code
+
+│   ├── crested_utils.py          # Full version with alignment- Comprehensive logging at each step
+
+│   ├── minimal_predict.py        # Minimal version for zero overlap- Clear error messages
+
+│   └── insilico_mutagenesis_vect.py  # SNP analysis- Shape validation
+
+├── tests/                         # Unit tests- Informative progress bars
+
+│   └── test_crested_utils.py     
+
+├── scripts/                       # Example scripts### 6. Type Hints and Documentation
+
+│   ├── example_usage.py          # Full version examples
+
+│   ├── demo_minimal.py           # Minimal version demo- Full type hints for better IDE support
+
+│   └── insilico_mutagenesis_vect_example.py- Comprehensive docstrings with examples
+
+├── LICENSE                        # MIT License- Clear parameter descriptions
+
+└── README.md                      # This file
+
+```## Installation
+
+
+
+## Key Functions```bash
+
+# Install CREsted (follow their instructions)
+
+### crested_utils.pypip install crested
+
+- `predict_regions()`: Predict accessibility for genomic regions
+
+- `align_adata_cell_types()`: Align cell types between datasets# Optional: for memory monitoring
+
+- `compare_predictions()`: Compare predicted vs real valuespip install psutil
+
+- `rowwise_correlation()`: Compute row-wise correlations```
+
+
+
+### minimal_predict.py## Quick Start
+
+- `predict_accessibility()`: Predict using model's cell types
+
+- `compare_across_celltypes()`: All-vs-all cell type comparison### Basic Prediction
+
+- `find_best_matches()`: Identify best matching cell types
 
 ```python
-from crested_utils import predict_regions
-import crested
+
+### insilico_mutagenesis_vect.pyfrom crested_utils import predict_regions
+
+- `insilico_mutagenesis_vect()`: Vectorized SNP effect analysisimport crested
+
 import anndata as ad
 
-# Load data and model
-adata = ad.read_h5ad("your_data.h5ad")
-model = crested.load_model("your_model")
+## Which Version Should I Use?
 
-# Make predictions (with automatic chunking)
+# Load data and model
+
+- **Use `crested_utils.py`** if your model and data share some cell types (e.g., both have "CD4 T cells")adata = ad.read_h5ad("your_data.h5ad")
+
+- **Use `minimal_predict.py`** if your model was trained on one species/dataset and you're predicting on a completely different species/dataset with no cell type overlapmodel = crested.load_model("your_model")
+
+
+
+## Requirements# Make predictions (with automatic chunking)
+
 adata_pred = predict_regions(
-    model=model,
-    regions=adata,
-    chunk_size=1000,  # Adjust based on your memory
-    verbose=True
-)
+
+- Python 3.9+    model=model,
+
+- crested    regions=adata,
+
+- anndata    chunk_size=1000,  # Adjust based on your memory
+
+- numpy    verbose=True
+
+- pandas)
+
+- psutil (optional, for memory monitoring)
 
 # Access predictions
-print(adata_pred.layers['predicted'].shape)
+
+## Licenseprint(adata_pred.layers['predicted'].shape)
+
 ```
+
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ### Cross-Species Comparison
 
+## Citation
+
 ```python
-from crested_utils import predict_regions, compare_predictions
-import matplotlib.pyplot as plt
+
+If you use these functions, please cite the CREsted paper:from crested_utils import predict_regions, compare_predictions
+
+- CREsted: [https://github.com/aertslab/CREsted](https://github.com/aertslab/CREsted)import matplotlib.pyplot as plt
+
 import seaborn as sns
 
 # Define reference cell types (e.g., from human)
