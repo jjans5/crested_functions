@@ -1,78 +1,154 @@
-# CREsted Functions# CREsted Functions# CREsted Utilities for Cross-Species Analysis
+# CREsted Functions# CREsted Functions# CREsted Functions# CREsted Utilities for Cross-Species Analysis
 
 
 
-Utility functions for cross-species enhancer predictions using the [CREsted](https://github.com/aertslab/CREsted) package.
+Utility functions for cross-species enhancer predictions using [CREsted](https://github.com/aertslab/CREsted).
 
 
 
-## OverviewUtility functions for cross-species enhancer predictions using the [CREsted](https://github.com/aertslab/CREsted) package.This package provides utility functions for working with [CREsted](https://github.com/aertslab/CREsted) predictions across different species, with a focus on comparing predicted vs observed values even when cell type dimensions don't match.
+## FeaturesUtility functions for cross-species enhancer predictions using the [CREsted](https://github.com/aertslab/CREsted) package.
 
 
+
+- **Predict accessibility** from region strings or AnnData objects
+
+- **Compare predictions** across species with automatic cell type alignment
+
+- **In-silico mutagenesis** with log2 fold change calculations## OverviewUtility functions for cross-species enhancer predictions using the [CREsted](https://github.com/aertslab/CREsted) package.This package provides utility functions for working with [CREsted](https://github.com/aertslab/CREsted) predictions across different species, with a focus on comparing predicted vs observed values even when cell type dimensions don't match.
+
+- **SNP analysis** from BED files with automated sequence extraction
+
+
+
+## Installation
 
 This repository provides tools for:
 
-- **Predicting accessibility** of genomic regions across cell types using trained CREsted models
+```bash
 
-- **Comparing predictions** with real scATAC-seq data, even when cell types don't match## Overview## Overview
-
-- **In-silico mutagenesis** for analyzing single-nucleotide variants
-
-- **SNP analysis from BED files** with automated sequence extraction and testing
-
-
-
-## InstallationThis repository provides tools for:The main module `crested_utils.py` provides:
-
-
-
-```bash- **Predicting accessibility** of genomic regions across cell types using trained CREsted models
-
-# Clone the repository
-
-git clone https://github.com/jjans5/crested_functions.git- **Comparing predictions** with real scATAC-seq data, even when cell types don't match1. **`predict_regions()`** - Unified function for making predictions on regions or AnnData objects
-
-cd crested_functions
-
-- **In-silico mutagenesis** for analyzing single-nucleotide variants2. **`align_adata_cell_types()`** - Align cell types across species (handling missing cell types)
-
-# Install dependencies
-
-pip install crested anndata numpy pandas3. **`compare_predictions()`** - Compare predicted vs true values with correlation metrics
+pip install crested anndata numpy pandas- **Predicting accessibility** of genomic regions across cell types using trained CREsted models
 
 ```
 
-## Installation4. **`rowwise_correlation()`** - Compute row-wise correlations between DataFrames
+- **Comparing predictions** with real scATAC-seq data, even when cell types don't match## Overview## Overview
 
-## Quick Start
+## Usage
 
-5. **`resize_region()`** - Resize genomic regions to specific lengths
+- **In-silico mutagenesis** for analyzing single-nucleotide variants
 
-### Option 1: Predict from Region Strings
+### Predict from regions
 
-```bash
-
-**New!** You can now predict directly from a list of region strings:
-
-# Clone the repository## Key Improvements Over Original Code
+- **SNP analysis from BED files** with automated sequence extraction and testing
 
 ```python
 
+from src.crested_utils import predict_regions
+
+
+
+# From region list## InstallationThis repository provides tools for:The main module `crested_utils.py` provides:
+
+regions = ["chr1:1000-2000", "chr2:3000-4000"]
+
+adata = predict_regions(model, regions, genome=genome)
+
+
+
+# From AnnData```bash- **Predicting accessibility** of genomic regions across cell types using trained CREsted models
+
+adata = predict_regions(model, your_adata)
+
+```# Clone the repository
+
+
+
+### Compare predictionsgit clone https://github.com/jjans5/crested_functions.git- **Comparing predictions** with real scATAC-seq data, even when cell types don't match1. **`predict_regions()`** - Unified function for making predictions on regions or AnnData objects
+
+
+
+```pythoncd crested_functions
+
+from src.crested_utils import compare_predictions
+
+- **In-silico mutagenesis** for analyzing single-nucleotide variants2. **`align_adata_cell_types()`** - Align cell types across species (handling missing cell types)
+
+results = compare_predictions(predicted_adata, real_adata)
+
+print(f"Mean correlation: {results['correlations'].mean():.3f}")# Install dependencies
+
+```
+
+pip install crested anndata numpy pandas3. **`compare_predictions()`** - Compare predicted vs true values with correlation metrics
+
+### In-silico mutagenesis
+
+```
+
+```python
+
+from src.insilico_mutagenesis_vect import insilico_mutagenesis_vect## Installation4. **`rowwise_correlation()`** - Compute row-wise correlations between DataFrames
+
+
+
+results = insilico_mutagenesis_vect(seq, model, adata)## Quick Start
+
+# Returns log2fc and delta for each mutation
+
+```5. **`resize_region()`** - Resize genomic regions to specific lengths
+
+
+
+### SNP analysis from BED### Option 1: Predict from Region Strings
+
+
+
+```python```bash
+
+from src.insilico_mutagenesis_vect import snp_mutagenesis_from_bed
+
+**New!** You can now predict directly from a list of region strings:
+
+results = snp_mutagenesis_from_bed("snps.bed", model, adata, genome)
+
+# Returns log2fc for each SNP across all cell types# Clone the repository## Key Improvements Over Original Code
+
+```
+
+```python
+
+## Structure
+
 from src.crested_utils import predict_regionsgit clone https://github.com/jjans5/crested_functions.git
 
+```
 
+crested_functions/
 
-# Predict from region stringscd crested_functions### 1. Unified Prediction Interface
+├── src/                    # Core modules
 
-regions = ["chr1:1000-2000", "chr1:3000-4000", "chr2:5000-6000"]
+├── tests/                  # Unit tests# Predict from region stringscd crested_functions### 1. Unified Prediction Interface
+
+├── scripts/                # Example scripts
+
+└── docs/                   # Documentation & examplesregions = ["chr1:1000-2000", "chr1:3000-4000", "chr2:5000-6000"]
+
+```
 
 predicted_adata = predict_regions(
 
+## Documentation
+
     model="path/to/model.keras",
+
+See [docs/](docs/) for detailed examples and tutorials.
 
     regions=regions,# Install dependencies**Before:** Multiple scattered functions with unclear interfaces
 
+## License
+
     genome=genome,
+
+MIT License - see [LICENSE](LICENSE)
 
     target_cell_types=["CellTypeA", "CellTypeB"]pip install crested anndata numpy pandas
 
