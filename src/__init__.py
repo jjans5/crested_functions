@@ -19,9 +19,11 @@ from .minimal_predict import (
     find_best_matches,
 )
 
-from .insilico_mutagenesis_vect import (
-    insilico_mutagenesis_vect,
-    snp_mutagenesis_from_bed,
+from .mutation_scoring import (
+    saturation_mutagenesis,
+    score_snps,
+    insilico_mutagenesis_vect,  # backward compatibility alias
+    snp_mutagenesis_from_bed,   # backward compatibility alias
 )
 
 __all__ = [
@@ -35,9 +37,11 @@ __all__ = [
     "predict_accessibility",
     "compare_across_celltypes",
     "find_best_matches",
-    # In-silico mutagenesis
-    "insilico_mutagenesis_vect",
-    "snp_mutagenesis_from_bed",
+    # Mutation scoring (mutation_scoring.py)
+    "saturation_mutagenesis",
+    "score_snps",
+    "insilico_mutagenesis_vect",  # backward compatibility
+    "snp_mutagenesis_from_bed",   # backward compatibility
 ]
 
 __version__ = "1.0.0"

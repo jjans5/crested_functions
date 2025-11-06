@@ -1,20 +1,44 @@
+"""
+Mutation Scoring Tools for CREsted Models
+
+This module provides tools for scoring the functional impact of mutations
+using trained CREsted models. It includes:
+
+1. In-Silico Saturation Mutagenesis (ISM): Test all possible single-nucleotide
+   mutations across a sequence to identify functional positions.
+
+2. SNP Scoring: Evaluate the predicted impact of specific SNPs from BED files
+   or DataFrames, with support for batch processing of large variant sets.
+
+All functions return log2 fold changes (log2(mutant/wildtype)) to quantify
+the directional impact of mutations on predicted accessibility.
+"""
+
 import numpy as np
 import pandas as pd
 from typing import Optional, Union, List
 
 
-def insilico_mutagenesis_vect(
+# ============================================================================
+# IN-SILICO SATURATION MUTAGENESIS (ISM)
+# ============================================================================
+
+
+def saturation_mutagenesis(
     seq: str,
     model,
     cell_types: Optional[Union[List[str], 'anndata.AnnData']] = None,
     chrom: str | None = None,
-    start: int | None = None,   # genomic start for seq[0]; if None we report 0-based pos0
+    start: int | None = None,
     skip_ambiguous: bool = True,
-    batch_size=2,
-    return_long: bool = True,   # also return tidy long table with deltas
+    batch_size: int = 32,
+    return_long: bool = True,
 ):
     """
-    Vectorized single-nucleotide in-silico mutagenesis (ISM).
+    Perform in-silico saturation mutagenesis on a DNA sequence.
+    
+    Tests all possible single-nucleotide substitutions across the entire sequence
+    to identify positions where mutations affect predicted accessibility.
 
     Parameters
     ----------
@@ -33,7 +57,7 @@ def insilico_mutagenesis_vect(
         Genomic start position for seq[0]
     skip_ambiguous : bool, default=True
         Skip positions with ambiguous nucleotides
-    batch_size : int, default=2
+    batch_size : int, default=32
         Batch size for predictions
     return_long : bool, default=True
         Return tidy long-format DataFrame with log2fc
@@ -41,12 +65,28 @@ def insilico_mutagenesis_vect(
     Returns
     -------
     dict with:
-      wt_pred:      pd.Series (index=cell_types)
-      mut_df_wide:  pd.DataFrame with metadata columns ['chrom','genomic_pos','pos0','ref','alt','mut_id']
-                    plus one column per cell type (absolute predictions)
-      mut_df_long:  (if return_long) tidy DataFrame with columns
-                    ['chrom','genomic_pos','pos0','ref','alt','mut_id','cell_type','value','log2fc','delta']
-                    where log2fc is log2(mutant/wildtype) and delta is (mutant - wildtype)
+      wt_pred : pd.Series
+          Wildtype predictions (index=cell_types)
+      mut_df_wide : pd.DataFrame
+          Wide-format with metadata columns ['chrom','genomic_pos','pos0','ref','alt','mut_id']
+          plus one column per cell type (absolute predictions)
+      mut_df_long : pd.DataFrame (if return_long=True)
+          Tidy long-format with columns:
+          ['chrom','genomic_pos','pos0','ref','alt','mut_id','cell_type','value','log2fc','delta']
+          where log2fc is log2(mutant/wildtype) and delta is (mutant - wildtype)
+          
+    Examples
+    --------
+    >>> # Test all mutations in a sequence
+    >>> results = saturation_mutagenesis(
+    ...     seq="ACGTACGT" * 250,  # 2kb sequence
+    ...     model=model,
+    ...     cell_types=['T_cell', 'B_cell']
+    ... )
+    >>> # Find high-impact positions
+    >>> high_impact = results['mut_df_long'][
+    ...     abs(results['mut_df_long']['log2fc']) > 1
+    ... ]
     """
     import crested
 
@@ -55,20 +95,17 @@ def insilico_mutagenesis_vect(
     
     # Handle cell_types input
     if cell_types is None:
-        # Will infer from model output shape
         cell_types_list = None
     elif hasattr(cell_types, 'obs_names'):
-        # It's an AnnData object
         cell_types_list = list(map(str, cell_types.obs_names))
     elif isinstance(cell_types, (list, tuple)):
-        # It's already a list
         cell_types_list = list(map(str, cell_types))
     else:
         raise TypeError("cell_types must be a list of strings, an AnnData object, or None")
     
     L = len(seq)
 
-    # 1) WT prediction
+    # 1) Predict wildtype
     wt = crested.tl.predict(input=[seq], model=model, batch_size=batch_size)
     wt = np.asarray(wt, dtype=np.float32).reshape(1, -1)
     
@@ -94,13 +131,9 @@ def insilico_mutagenesis_vect(
         if ref not in bases:
             if skip_ambiguous:
                 continue
-            else:
-                # If not skipping, we still only allow A/C/G/T as alts (no N->N)
-                pass
         for alt in bases:
             if alt == ref:
                 continue
-            # assemble mutated sequence
             mutant_seqs.append(seq[:i] + alt + seq[i+1:])
             chrom_list.append(chrom)
             gpos_list.append((start + i) if start is not None else None)
@@ -129,6 +162,7 @@ def insilico_mutagenesis_vect(
         "ref": ref_list,
         "alt": alt_list,
     })
+    
     # Stable, human-readable mutation identifier
     if start is not None and chrom is not None:
         meta_df["mut_id"] = (
@@ -152,24 +186,21 @@ def insilico_mutagenesis_vect(
 
     out = {"wt_pred": wt_pred, "mut_df_wide": mut_df_wide}
 
-    # 5) Optional: tidy long table with deltas (log2 fold change)
+    # 5) Optional: tidy long table with log2 fold changes
     if return_long:
         long = mut_df_wide.melt(
             id_vars=["chrom","genomic_pos","pos0","ref","alt","mut_id"],
-            value_vars=cell_types,
+            value_vars=cell_types_list,
             var_name="cell_type",
             value_name="value"
         )
-        # map wt once (fast)
+        
         wt_map = wt_pred.to_dict()
         wt_values = long["cell_type"].map(wt_map)
         
         # Calculate log2 fold change: log2(mut/wt)
-        # Add small epsilon to avoid division by zero
         epsilon = 1e-10
         long["log2fc"] = np.log2((long["value"] + epsilon) / (wt_values + epsilon)).astype(np.float32)
-        
-        # Also keep absolute delta for reference
         long["delta"] = (long["value"] - wt_values).astype(np.float32)
         
         out["mut_df_long"] = long
@@ -177,36 +208,48 @@ def insilico_mutagenesis_vect(
     return out
 
 
-def snp_mutagenesis_from_bed(
+# Backward compatibility alias
+insilico_mutagenesis_vect = saturation_mutagenesis
+
+
+# ============================================================================
+# SNP SCORING
+# ============================================================================
+
+
+def score_snps(
     bed_file: Union[str, pd.DataFrame],
     model,
     genome,
     cell_types: Optional[Union[List[str], 'anndata.AnnData']] = None,
     seq_length: Optional[int] = None,
-    batch_size: int = 32,  # Increased default for speed
+    batch_size: int = 32,
     return_long: bool = True,
     skip_ambiguous: bool = True,
-    chunk_size: int = 1000,  # Process SNPs in chunks to avoid memory issues
+    chunk_size: int = 1000,
 ) -> pd.DataFrame:
     """
-    Perform in-silico mutagenesis for SNPs from a BED file or DataFrame.
+    Score SNPs from a BED file or DataFrame using a trained CREsted model.
     
     This function:
-    1. Reads SNP positions from a BED file or accepts a DataFrame
-    2. Extracts sequences centered on each SNP (using model's seq_length)
+    1. Reads SNP positions from a BED file or DataFrame
+    2. Extracts sequences centered on each SNP
     3. Predicts accessibility for wildtype and mutant sequences
     4. Returns log2 fold changes for each SNP-cell_type combination
     
+    Processes SNPs in chunks to handle large datasets (100k+ SNPs) without
+    running out of memory. Progress messages are printed per chunk.
+
     Parameters
     ----------
     bed_file : str or pd.DataFrame
-        Path to BED file or a pandas DataFrame. Can have formats:
-        - 3 columns: chrom, start, end (will test all mutations)
-        - 4+ columns: chrom, start, end, name, ref, alt (will test specific ref>alt)
-        - 5+ columns: chrom, start, end, ref, alt (name optional)
-        - Flexible: ref and alt can be in any columns after position 3
+        Path to BED file or a pandas DataFrame with SNP positions.
+        Supported formats:
+        - 3 columns: chrom, start, end (will test all 3 possible mutations)
+        - 5 columns: chrom, start, end, ref, alt (will test specific ref>alt)
+        - 6+ columns: chrom, start, end, name, ref, alt (name is ignored)
         
-        If DataFrame, should have columns matching the BED format above.
+        If DataFrame, should have columns matching BED format above.
     model : CREsted model
         Trained model for predictions
     genome : crested.Genome
@@ -235,24 +278,15 @@ def snp_mutagenesis_from_bed(
         
     Examples
     --------
-    >>> # From BED file with just positions (will test all mutations)
-    >>> results = snp_mutagenesis_from_bed(
+    >>> # From BED file with positions only
+    >>> results = score_snps(
     ...     bed_file="snps.bed",
     ...     model=model,
     ...     genome=genome,
-    ...     cell_types=['CellType1', 'CellType2']  # or adata, or None
+    ...     cell_types=['T_cell', 'B_cell']
     ... )
     
-    >>> # From BED file with ref/alt specified
-    >>> results = snp_mutagenesis_from_bed(
-    ...     bed_file="snps_with_alleles.bed",
-    ...     model=model,
-    ...     genome=genome,
-    ...     cell_types=adata  # Can pass AnnData directly
-    ... )
-    
-    >>> # From DataFrame with auto-generated cell type names
-    >>> import pandas as pd
+    >>> # From DataFrame with specific ref/alt
     >>> snps_df = pd.DataFrame({
     ...     'chrom': ['chr1', 'chr2'],
     ...     'start': [1000, 2000],
@@ -260,11 +294,18 @@ def snp_mutagenesis_from_bed(
     ...     'ref': ['A', 'C'],
     ...     'alt': ['G', 'T']
     ... })
-    >>> results = snp_mutagenesis_from_bed(
+    >>> results = score_snps(
     ...     bed_file=snps_df,
     ...     model=model,
     ...     genome=genome
-    ...     # cell_types=None means auto-generate from model output
+    ... )
+    
+    >>> # Large dataset with custom chunk size
+    >>> results = score_snps(
+    ...     bed_file="325k_snps.bed",
+    ...     model=model,
+    ...     genome=genome,
+    ...     chunk_size=500  # Smaller chunks if memory limited
     ... )
     """
     import crested
@@ -474,3 +515,7 @@ def snp_mutagenesis_from_bed(
     print(f"Finished! Total results: {len(all_results)}")
     combined_df = pd.DataFrame(all_results)
     return combined_df
+
+
+# Backward compatibility alias
+snp_mutagenesis_from_bed = score_snps
